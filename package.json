@@ -1,7 +1,7 @@
 {
   "name": "worms-emulator",
-  "version": "1.0.0",
-  "description": "A multiplayer Worms-style turn-based artillery game playable in the browser with friends.",
+  "version": "2.0.0",
+  "description": "A local pass-and-play (hot-seat) Worms-style turn-based artillery game. Rotate one phone between players.",
   "main": "server.js",
   "type": "commonjs",
   "scripts": {
@@ -11,16 +11,10 @@
   "keywords": [
     "worms",
     "game",
-    "multiplayer",
+    "hotseat",
+    "pass-and-play",
     "artillery",
-    "socket.io"
+    "local-multiplayer"
   ],
-  "license": "MIT",
-  "dependencies": {
-    "express": "^4.19.2",
-    "socket.io": "^4.7.5"
-  },
-  "devDependencies": {
-    "socket.io-client": "^4.8.3"
-  }
+  "license": "MIT"
 }

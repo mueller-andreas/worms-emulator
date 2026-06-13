@@ -1,21 +1,18 @@
 'use strict';
 
 /*
- * End-to-end smoke test (no browser needed).
+ * Local pass-and-play smoke test (no browser, no network).
  *
- * Boots the real server, connects two Socket.IO clients, walks through the full
- * lobby -> start -> play flow, and asserts the authoritative simulation behaves:
- * a match starts, worms spawn on the terrain, turns rotate, and firing a weapon
- * produces an explosion that carves terrain and can damage a worm.
+ * Drives the in-process GameRoom exactly as the browser client does: create a
+ * match, add teams, start, fire a weapon, and step the simulation. Asserts the
+ * core mechanics behave — deterministic terrain, grounded spawns, configurable
+ * worms-per-team, explosions that carve terrain, and turn rotation.
  *
  * Run with: npm test
  */
 
 const assert = require('assert');
-const { io: ioClient } = require('socket.io-client');
-
-process.env.PORT = '0'; // let the OS pick a free port
-const { server } = require('../server');
+const { GameRoom } = require('../src/game');
 const C = require('../shared/constants');
 const Terrain = require('../shared/terrain');
 
@@ -27,113 +24,79 @@ function check(name, cond) {
   log('ok —', name);
 }
 
-function connect(port) {
-  return new Promise((resolve, reject) => {
-    const c = ioClient(`http://localhost:${port}`, { transports: ['websocket'], reconnection: false });
-    c.on('connect', () => resolve(c));
-    c.on('connect_error', reject);
-  });
+// Collect every event the simulation broadcasts.
+const events = [];
+const game = new GameRoom('LOCAL', (e, p) => events.push({ e, p }));
+game.local = true;
+game.wormsPerTeam = 2;
+
+game.addPlayer('p0', 'Alpha');
+game.addPlayer('p1', 'Bravo');
+check('two teams added to the match', game.players.size === 2);
+
+const res = game.start();
+check('match starts', res.ok === true);
+check('honours configurable worms-per-team (2x2 = 4 worms)', game.worms.length === 4);
+
+// Determinism: regenerate terrain from the seed like a client would, and confirm
+// every worm spawned resting on solid ground.
+const terrain = Terrain.generate(game.seed, C.WORLD_WIDTH, C.WORLD_HEIGHT);
+let grounded = true;
+for (const w of game.worms) {
+  const feet = Math.round(w.y + C.WORM_HEIGHT);
+  const ok = Terrain.isSolid(terrain, Math.round(w.x), feet) ||
+    Terrain.isSolid(terrain, Math.round(w.x), feet + 1) ||
+    Terrain.isSolid(terrain, Math.round(w.x), feet + 2);
+  if (!ok) grounded = false;
 }
+check('worms spawn resting on the deterministically-generated terrain', grounded);
 
-function once(sock, event, timeout = 4000) {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('timeout waiting for ' + event)), timeout);
-    sock.once(event, (data) => { clearTimeout(timer); resolve(data); });
-  });
+const firstTurn = events.find((ev) => ev.e === 'turn');
+check('a first turn is announced', !!firstTurn);
+check('an active worm is assigned', !!game.activeWormId);
+
+// Local mode lets the single human control whichever worm is active.
+const active = game.activeWorm();
+const activeTeam = active.team;
+const aim = active.x < C.WORLD_WIDTH / 2 ? 0.2 : Math.PI - 0.2;
+game.handleInput(null, { type: 'weapon', weapon: 'bazooka' });
+game.handleInput(null, { type: 'aim', aim });
+check('weapon selection is accepted in local mode', game.currentWeapon === 'bazooka');
+
+game.handleInput(null, { type: 'fire', power: 100, aim });
+check('firing transitions to the firing phase', game.phase === 'firing');
+
+// Step the simulation until the rocket explodes (or give up after ~20s of game time).
+let boom = null;
+for (let i = 0; i < C.TICK_RATE * 20 && !boom; i++) {
+  game.tick();
+  boom = events.find((ev) => ev.e === 'explosion');
 }
+check('firing a bazooka produces an explosion', !!boom);
 
-(async () => {
-  await new Promise((res) => server.listen(0, res));
-  const port = server.address().port;
-  log('server listening on', port);
+// Mirror the crater and confirm terrain was destroyed at the blast centre.
+Terrain.carveCircle(terrain, boom.p.x, boom.p.y, boom.p.r);
+check('explosion carves out terrain (crater is empty)', !Terrain.isSolid(terrain, boom.p.x, boom.p.y));
 
-  const host = await connect(port);
-  const guest = await connect(port);
+// Keep stepping until the next turn is announced; it must move to another team.
+const turnsBefore = events.filter((ev) => ev.e === 'turn').length;
+let nextTurn = null;
+for (let i = 0; i < C.TICK_RATE * 20 && !nextTurn; i++) {
+  game.tick();
+  const turns = events.filter((ev) => ev.e === 'turn');
+  if (turns.length > turnsBefore) nextTurn = turns[turns.length - 1];
+}
+check('turn advances after the world settles', !!nextTurn);
+check('turn passes to a different team', nextTurn.p.team !== activeTeam);
+log('first team:', activeTeam, '→ next team:', nextTurn.p.team);
 
-  // --- Join / create a room ---
-  const hostJoin = await new Promise((res) => host.emit('join', { name: 'Host', room: '' }, res));
-  check('host can create a room', hostJoin.ok && hostJoin.code);
-  const code = hostJoin.code;
+// A 3-team / 3-worm setup should produce 9 worms.
+const g2 = new GameRoom('L2', () => {});
+g2.local = true;
+g2.wormsPerTeam = 3;
+['Red', 'Blue', 'Green'].forEach((n, i) => g2.addPlayer('t' + i, n));
+g2.start();
+check('three teams of three spawn nine worms', g2.worms.length === 9);
 
-  // Attach the lobby listener *before* joining so we can't miss the broadcast
-  // that arrives in the same network frame as the join acknowledgement.
-  const lobbyP = once(guest, 'lobby');
-  const guestJoin = await new Promise((res) => guest.emit('join', { name: 'Guest', room: code }, res));
-  check('guest can join with the room code', guestJoin.ok && guestJoin.code === code);
-
-  const lobby = await lobbyP;
-  check('lobby reports two players', lobby.players.length === 2);
-  check('host is flagged as host', lobby.players.find((p) => p.isHost).name === 'Host');
-  check('players are on different teams', lobby.players[0].team !== lobby.players[1].team);
-
-  // --- Non-host cannot start ---
-  const guestStart = await new Promise((res) => guest.emit('start', {}, res));
-  check('non-host cannot start the game', guestStart.ok === false);
-
-  // --- Host starts ---
-  const startedP = once(host, 'gameStart');
-  const hostStart = await new Promise((res) => host.emit('start', {}, res));
-  check('host can start the game', hostStart.ok === true);
-  const gs = await startedP;
-  check('gameStart includes a seed and world size', gs.seed >= 0 && gs.worldW === C.WORLD_WIDTH);
-  const expectedWorms = 2 * C.WORMS_PER_TEAM;
-  check(`spawns ${expectedWorms} worms`, gs.worms.length === expectedWorms);
-
-  // Rebuild terrain from the seed exactly like a client would, and verify all
-  // worms spawned resting on (just above) solid ground — proves determinism.
-  const terrain = Terrain.generate(gs.seed, gs.worldW, gs.worldH);
-  let allGrounded = true;
-  for (const w of gs.worms) {
-    const feet = Math.round(w.y + C.WORM_HEIGHT);
-    const groundBelow = Terrain.isSolid(terrain, Math.round(w.x), feet) ||
-      Terrain.isSolid(terrain, Math.round(w.x), feet + 1) ||
-      Terrain.isSolid(terrain, Math.round(w.x), feet + 2);
-    if (!groundBelow) { allGrounded = false; log('   worm not grounded at', w.x, w.y); }
-  }
-  check('worms spawn resting on the deterministically-generated terrain', allGrounded);
-
-  // --- Turn assignment ---
-  const turn = await once(host, 'turn', 5000).catch(() => null) || gs;
-  const firstActive = gs.activeWormId;
-  check('an active worm is assigned for the first turn', !!firstActive);
-
-  // --- Identify which client controls the active worm and fire a bazooka ---
-  const stateMsg = await once(host, 'state', 5000);
-  const activeWorm = stateMsg.worms.find((w) => w.id === stateMsg.activeWormId);
-  check('active worm exists in state broadcast', !!activeWorm);
-
-  const hostTeam = lobby.players.find((p) => p.name === 'Host').team;
-  const shooter = activeWorm.team === hostTeam ? host : guest;
-  log('active team is', activeWorm.team, '— shooter is', activeWorm.team === hostTeam ? 'Host' : 'Guest');
-
-  // Aim roughly horizontally toward the centre and fire at full power.
-  const aimDir = activeWorm.x < C.WORLD_WIDTH / 2 ? 0.2 : Math.PI - 0.2;
-  shooter.emit('input', { type: 'weapon', weapon: 'bazooka' });
-  shooter.emit('input', { type: 'aim', aim: aimDir });
-
-  const explosionP = once(host, 'explosion', 8000);
-  shooter.emit('input', { type: 'fire', power: 100, aim: aimDir });
-  const boom = await explosionP;
-  check('firing a bazooka produces an explosion', typeof boom.x === 'number' && boom.r > 0);
-
-  // The explosion must have carved terrain at its centre.
-  Terrain.carveCircle(terrain, boom.x, boom.y, boom.r); // mirror the crater
-  check('explosion carves out terrain (crater is empty)', !Terrain.isSolid(terrain, boom.x, boom.y));
-
-  // --- Turn should advance to the other team after the world settles ---
-  const nextTurn = await once(host, 'turn', 12000);
-  check('turn advances to the next team after firing', true);
-  log('next turn team:', nextTurn.team);
-
-  // --- Disconnect cleanup ---
-  host.close();
-  guest.close();
-  await new Promise((r) => setTimeout(r, 300));
-
-  console.log(`\n  ✅ All ${passed} checks passed.\n`);
-  server.close();
-  process.exit(0);
-})().catch((err) => {
-  console.error('\n  ❌ Smoke test failed:\n', err);
-  process.exit(1);
-});
+console.log(`\n  ✅ All ${passed} checks passed.\n`);
+process.exit(0);

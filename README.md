@@ -1,85 +1,97 @@
-# 🪱 Worms Emulator
+# 🪱 Worms Emulator — Pass &amp; Play
 
-A multiplayer, turn-based **artillery game** in the spirit of *Worms* — destructible
-terrain, gravity-and-wind projectiles, and last-team-standing mayhem. Runs entirely
-in the browser; you and your friends just open a link and share a 4-letter room code.
+A local, turn-based **artillery game** in the spirit of *Worms* — destructible
+terrain, gravity-and-wind projectiles, and last-team-standing mayhem. Everyone
+plays on **one device**: pass the phone (or tablet/laptop) around and take turns.
 
-![play in the browser, no install for players](https://img.shields.io/badge/play-in%20browser-46c93a) ![node](https://img.shields.io/badge/node-%E2%89%A518-3da6ff)
+No server, no accounts, no internet required during play — it's a single static
+web page that runs entirely in the browser.
+
+![play in the browser](https://img.shields.io/badge/play-in%20browser-46c93a) ![no dependencies](https://img.shields.io/badge/dependencies-none-3da6ff)
 
 ## Features
 
-- **Real-time multiplayer** over WebSockets (Socket.IO) — 2 to 6 players per room.
-- **Server-authoritative simulation** so nobody can cheat and everyone stays in sync.
+- **Local pass-and-play (hot-seat)** for 2–6 teams on a single device.
+- Between turns, a **"pass the phone"** screen names the next player so handing the
+  device over is clean and nobody peeks/acts early.
+- **Touch controls** for phones and tablets, plus full keyboard + mouse on desktop.
 - **Fully destructible terrain** — every explosion carves a real crater.
 - **Physics**: gravity, wind, knockback, fall damage, and worms that drown if they
   fall in the water.
 - **Four weapons**: 🚀 Bazooka, 💣 Grenade (bounces, timed fuse), 🔫 Shotgun
   (hitscan), and ✈️ Air Strike.
-- Turn timer, wind indicator, health bars, team scoreboard, and in-game chat.
+- Configurable number of teams and worms-per-team, custom team names, turn timer,
+  wind indicator, health bars and a live scoreboard.
 
 ## How to play
+
+Open the page, choose how many teams and worms each, name the teams, and hit
+**Start Game**. Each turn the screen says whose go it is — hand the device over,
+they tap **Start Turn**, then:
+
+**On a phone/tablet (touch):**
+- ◀ ▶ buttons to walk, **JUMP** to jump.
+- Drag on the battlefield to **aim** (or use the ▲ ▼ buttons to fine-tune).
+- Hold the **FIRE** button to charge power, release to shoot.
+- Tap a weapon name in the top bar to switch weapons.
+
+**On a desktop (keyboard + mouse):**
 
 | Action | Keys |
 | --- | --- |
 | Move | `←` `→` or `A` / `D` |
 | Jump | `Enter` |
-| Aim | `↑` `↓` (or move the **mouse**) |
-| Fire | hold **`Space`** (or hold the mouse button) to charge power, release to shoot |
+| Aim | `↑` `↓` or move the **mouse** |
+| Fire | hold **`Space`** to charge power, release to shoot |
 | Weapons | `1` Bazooka · `2` Grenade · `3` Shotgun · `4` Air Strike |
-| Chat | `T` |
 
-Watch the **wind** arrow — it pushes bazooka rockets across the map. Last team with a
-worm still standing wins.
+Watch the **wind** arrow — it pushes bazooka rockets across the map. Last team with
+a worm still standing wins.
 
 ## Run it
 
-You need [Node.js](https://nodejs.org) ≥ 18.
+The simplest way: just open `index.html` in a browser. To serve it locally with a
+tiny built-in server (handy on phones via your LAN), with **no dependencies to
+install**:
 
 ```bash
-npm install
-npm start
+npm start        # or: node server.js
 ```
 
-Then open **http://localhost:3000**. Enter a name, leave the room code blank to
-**create** a room, and share the 4-letter code shown so friends can **join** the same
-room. The host presses **Start Game** once at least 2 players are in.
+Then open **http://localhost:3000** (or `http://<your-computer-ip>:3000` from a
+phone on the same Wi-Fi).
 
-Run the end-to-end test suite with:
+Run the test suite (drives the real game simulation):
 
 ```bash
 npm test
 ```
 
-## Playing together over the internet
+## Host it for free on GitHub Pages
 
-The game needs a running Node server (a plain GitHub Pages static site can't host
-WebSockets), so pick one of these:
+Because it's a static site at the repository root, you can publish it with GitHub
+Pages and get a permanent URL you can open on any phone:
 
-1. **Quick & free — one player hosts + a tunnel.** Run `npm start`, then expose your
-   port with a tunnel and share the public URL:
-   ```bash
-   npx localtunnel --port 3000     # or: cloudflared tunnel --url http://localhost:3000
-   ```
-2. **Same Wi-Fi / LAN.** Run `npm start` and share `http://<your-local-ip>:3000`.
-3. **Deploy to a free host.** This repo includes a `render.yaml`, so you can deploy to
-   [Render](https://render.com) in a couple of clicks (New → Blueprint → point it at
-   this repo). It also works as-is on Railway, Fly.io, Glitch, or any host that runs a
-   Node web service — the server respects the `PORT` environment variable.
+1. Push this to your `main` branch.
+2. In the repo: **Settings → Pages → Build and deployment → Deploy from a branch**,
+   pick `main` and the `/ (root)` folder, save.
+3. After a minute it's live at `https://<your-username>.github.io/worms-emulator/`.
+
+Open that link on the device you'll pass around — done.
 
 ## Project layout
 
 ```
-server.js            Express + Socket.IO server; one game room per code
-src/game.js          Authoritative game simulation (physics, turns, weapons)
-shared/constants.js  Tunable constants shared by server and client
-shared/terrain.js    Deterministic, destructible terrain (seed-based)
-public/              Browser client (canvas renderer, input, networking)
-test/smoke.test.js   End-to-end test of the full lobby → play flow
+index.html           The whole game UI (setup screen, canvas, touch controls)
+style.css            Styling, including the mobile/touch layout
+client.js            Browser glue: setup, rendering, input, pass-the-phone flow
+src/game.js          The game simulation (physics, turns, weapons) — runs in the
+                     browser for local play, and under Node for the tests
+shared/constants.js  Tunable constants (world size, gravity, weapons, …)
+shared/terrain.js    Deterministic, destructible terrain
+server.js            Optional zero-dependency static file server for `npm start`
+test/smoke.test.js   End-to-end test of the simulation
 ```
-
-The terrain is generated identically on the server and every client from a single
-seed, so the only per-frame network traffic is tiny entity snapshots plus crater
-events — keeping it smooth even over modest connections.
 
 ## License
 

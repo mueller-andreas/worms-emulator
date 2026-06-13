@@ -1,25 +1,23 @@
 'use strict';
 
-/* global io, WormsConstants, WormsTerrain */
+/* global WormsConstants, WormsTerrain, WormsGame */
 
 const C = WormsConstants;
 const T = WormsTerrain;
+const { GameRoom } = WormsGame;
 
 // ----------------------------------------------------------------------------
-// Networking
+// State
 // ----------------------------------------------------------------------------
-const socket = io();
-
 const State = {
-  myId: null,
-  myTeam: null,
-  roomCode: null,
-  isHost: false,
+  game: null,
+  tickTimer: null,
   started: false,
+  paused: true,
 
-  // world
-  terrain: null, // {grid,width,height}
-  terrainCanvas: null, // offscreen rendered terrain
+  // world (mirrors what the simulation broadcasts)
+  terrain: null,
+  terrainCanvas: null,
   worms: [],
   projectiles: [],
   activeWormId: null,
@@ -29,6 +27,9 @@ const State = {
   phase: 'lobby',
   timeLeft: 0,
 
+  teamNames: [],
+  wormsPerTeam: 3,
+
   // effects
   particles: [],
   tracers: [],
@@ -36,120 +37,154 @@ const State = {
   // local input / aim
   charging: false,
   power: 0,
-  localAim: null, // radians, controlled locally for our worm
+  localAim: null,
   walkDir: 0,
-  useMouseAim: false,
-  mouse: { x: 0, y: 0 },
 
   camX: 0,
   camY: 0,
 };
 
-// ----------------------------------------------------------------------------
-// DOM helpers
-// ----------------------------------------------------------------------------
 const $ = (id) => document.getElementById(id);
-const lobbyEl = $('lobby');
-const gameEl = $('game');
 
 // ----------------------------------------------------------------------------
-// Lobby
+// Setup screen
 // ----------------------------------------------------------------------------
-$('joinBtn').addEventListener('click', join);
-$('roomInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') join(); });
-$('nameInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') join(); });
+const config = { teams: 2, worms: 3, names: [] };
+const MAX_TEAMS = Math.min(C.MAX_PLAYERS, C.TEAM_NAMES.length);
 
-function join() {
-  const name = $('nameInput').value.trim() || 'Worm';
-  const room = $('roomInput').value.trim().toUpperCase();
-  $('lobbyError').textContent = '';
-  socket.emit('join', { name, room }, (res) => {
-    if (!res || !res.ok) {
-      $('lobbyError').textContent = (res && res.error) || 'Could not join room';
-      return;
-    }
-    State.myId = res.you;
-    State.roomCode = res.code;
-    $('roomCode').textContent = res.code;
-    $('waiting').classList.remove('hidden');
-    $('joinBtn').disabled = true;
-    $('nameInput').disabled = true;
-    $('roomInput').disabled = true;
-  });
-}
+function defaultName(i) { return C.TEAM_NAMES[i % C.TEAM_NAMES.length]; }
 
-$('startBtn').addEventListener('click', () => {
-  socket.emit('start', {}, (res) => {
-    if (res && !res.ok) $('lobbyError').textContent = res.error;
-  });
-});
-
-socket.on('lobby', (snap) => {
-  State.isHost = snap.hostId === State.myId;
-  State.roomCode = snap.code;
-  const me = snap.players.find((p) => p.id === State.myId);
-  if (me) State.myTeam = me.team;
-
-  const list = $('playerList');
-  list.innerHTML = '';
-  snap.players.forEach((p) => {
-    const li = document.createElement('li');
+function renderTeamNameInputs() {
+  const box = $('teamNames');
+  // preserve already-typed names
+  const existing = [...box.querySelectorAll('input')].map((el) => el.value);
+  box.innerHTML = '';
+  for (let i = 0; i < config.teams; i++) {
+    const row = document.createElement('div');
+    row.className = 'team-row-input';
     const dot = document.createElement('span');
     dot.className = 'dot';
-    dot.style.background = p.teamColor;
-    li.appendChild(dot);
-    const label = document.createElement('span');
-    label.textContent = `${p.name} (${p.teamName})${p.id === State.myId ? ' — you' : ''}`;
-    li.appendChild(label);
-    if (p.isHost) {
-      const b = document.createElement('span');
-      b.className = 'host-badge';
-      b.textContent = 'HOST';
-      li.appendChild(b);
-    }
-    list.appendChild(li);
-  });
+    dot.style.background = C.TEAM_COLORS[i % C.TEAM_COLORS.length];
+    const input = document.createElement('input');
+    input.maxLength = 16;
+    input.value = existing[i] || defaultName(i);
+    input.placeholder = defaultName(i);
+    row.appendChild(dot);
+    row.appendChild(input);
+    box.appendChild(row);
+  }
+}
 
-  const enough = snap.players.length >= snap.minPlayers;
-  $('startBtn').classList.toggle('hidden', !(State.isHost && enough));
-  $('waitMsg').textContent = State.isHost
-    ? (enough ? '' : `Need at least ${snap.minPlayers} players to start.`)
-    : 'Waiting for the host to start the game…';
+document.querySelectorAll('[data-stepper]').forEach((stepper) => {
+  const kind = stepper.dataset.stepper;
+  stepper.querySelectorAll('[data-step]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const delta = parseInt(btn.dataset.step, 10);
+      if (kind === 'teams') {
+        config.teams = clamp(config.teams + delta, 2, MAX_TEAMS);
+        $('teamCount').textContent = config.teams;
+        renderTeamNameInputs();
+      } else {
+        config.worms = clamp(config.worms + delta, 1, 5);
+        $('wormCount').textContent = config.worms;
+      }
+    });
+  });
 });
 
+$('startBtn').addEventListener('click', () => {
+  const inputs = [...$('teamNames').querySelectorAll('input')];
+  config.names = inputs.map((el, i) => (el.value.trim() || defaultName(i)).slice(0, 16));
+  startMatch();
+});
+
+renderTeamNameInputs();
+
 // ----------------------------------------------------------------------------
-// Game start / state
+// Local game runner — the simulation runs right here in the browser.
 // ----------------------------------------------------------------------------
-socket.on('gameStart', (data) => {
+function startMatch() {
+  const game = new GameRoom('LOCAL', () => {}); // swallow events during setup
+  game.local = true;
+  game.wormsPerTeam = config.worms;
+  config.names.forEach((name, i) => game.addPlayer('p' + i, name));
+
+  const res = game.start();
+  if (!res.ok) { alert(res.error); return; }
+
+  // Wire real event handling, then announce the start + first turn in order.
+  game.broadcast = handleGameEvent;
+  State.game = game;
+  State.teamNames = config.names.slice();
+  State.wormsPerTeam = config.worms;
+
+  onGameStart(game.fullStateForJoin());
+  onTurn(currentTurnPayload(game));
+
+  // Drive the simulation. Paused while the pass-the-phone overlay is up.
+  State.tickTimer = setInterval(() => {
+    if (!State.paused && State.game) {
+      try { State.game.tick(); } catch (e) { console.error(e); }
+    }
+  }, 1000 / C.TICK_RATE);
+
+  $('setup').classList.add('hidden');
+  $('game').classList.remove('hidden');
+  document.body.classList.add('in-game');
+  resizeCanvas();
+  renderWeaponChips();
+}
+
+function currentTurnPayload(game) {
+  const team = game.teamOrder[game.turnPtr];
+  return {
+    team,
+    teamName: C.TEAM_NAMES[team % C.TEAM_NAMES.length],
+    activeWormId: game.activeWormId,
+    wind: game.wind,
+    windMax: C.WIND_MAX,
+    timeLeft: game.turnTimer,
+  };
+}
+
+function handleGameEvent(ev, p) {
+  switch (ev) {
+    case 'gameStart': onGameStart(p); break;
+    case 'state': onState(p); break;
+    case 'turn': onTurn(p); break;
+    case 'weapon': State.weapon = p.weapon; renderWeaponChips(); break;
+    case 'explosion': onExplosion(p); break;
+    case 'fx': onFx(p); break;
+    case 'gameOver': onGameOver(p); break;
+  }
+}
+
+function sendInput(msg) {
+  if (State.game) State.game.handleInput(null, msg);
+}
+
+// ----------------------------------------------------------------------------
+// Event handlers (mirror of the old network handlers, now local calls)
+// ----------------------------------------------------------------------------
+function onGameStart(data) {
   State.started = true;
   State.terrain = T.generate(data.seed, data.worldW, data.worldH);
   buildTerrainCanvas();
   (data.craters || []).forEach((cr) => applyCrater(cr.x, cr.y, cr.r, false));
-  State.worms = data.worms;
+  State.worms = data.worms.map((w) => ({ ...w, rx: w.x, ry: w.y }));
   State.activeWormId = data.activeWormId;
   State.wind = data.wind;
   State.windMax = data.windMax;
   State.weapon = data.currentWeapon;
   State.phase = data.phase;
-  lobbyEl.classList.add('hidden');
-  gameEl.classList.remove('hidden');
-  resizeCanvas();
-  renderWeaponChips();
-});
+}
 
-socket.on('state', (s) => {
-  // Smoothly adopt new authoritative positions.
+function onState(s) {
   const prev = new Map(State.worms.map((w) => [w.id, w]));
   State.worms = s.worms.map((w) => {
     const old = prev.get(w.id);
-    if (old && old.alive) {
-      // keep a render position we lerp toward the authoritative one
-      w.rx = old.rx !== undefined ? old.rx : w.x;
-      w.ry = old.ry !== undefined ? old.ry : w.y;
-    } else {
-      w.rx = w.x;
-      w.ry = w.y;
-    }
+    w.rx = old && old.rx !== undefined ? old.rx : w.x;
+    w.ry = old && old.ry !== undefined ? old.ry : w.y;
     return w;
   });
   State.projectiles = s.projectiles;
@@ -158,14 +193,11 @@ socket.on('state', (s) => {
   State.wind = s.wind;
   State.weapon = s.weapon;
   State.timeLeft = s.timeLeft;
-
-  // When it's not our turn, mirror the server's aim so we don't fight it.
-  if (!isMyTurn()) State.localAim = null;
   renderWeaponChips();
   updateHud();
-});
+}
 
-socket.on('turn', (t) => {
+function onTurn(t) {
   State.activeWormId = t.activeWormId;
   State.wind = t.wind;
   State.windMax = t.windMax;
@@ -174,20 +206,19 @@ socket.on('turn', (t) => {
   State.charging = false;
   State.power = 0;
   State.walkDir = 0;
-  State.localAim = null; // adopt server aim, then take over locally if it's us
-  $('turnTeam').textContent = `${t.teamName}'s turn`;
+  State.localAim = null;
+  $('turnTeam').textContent = `${displayName(t.team)}'s turn`;
   $('turnTeam').style.color = C.TEAM_COLORS[t.team % C.TEAM_COLORS.length];
   updateHud();
-});
+  showPassOverlay(t.team);
+}
 
-socket.on('weapon', (d) => { State.weapon = d.weapon; renderWeaponChips(); });
-
-socket.on('explosion', (e) => {
+function onExplosion(e) {
   applyCrater(e.x, e.y, e.r, true);
   spawnExplosionParticles(e.x, e.y, e.r);
-});
+}
 
-socket.on('fx', (fx) => {
+function onFx(fx) {
   if (fx.type === 'tracer') {
     State.tracers.push({ x1: fx.x1, y1: fx.y1, x2: fx.x2, y2: fx.y2, life: 8 });
   } else if (fx.type === 'launch') {
@@ -197,38 +228,60 @@ socket.on('fx', (fx) => {
   } else if (fx.type === 'death' || fx.type === 'drown') {
     spawnExplosionParticles(fx.x, fx.y, 24);
   }
-});
+}
 
-socket.on('gameOver', (g) => {
+function onGameOver(g) {
+  State.paused = true;
   const ov = $('overlay');
   ov.classList.remove('hidden');
   ov.innerHTML = '';
   const title = document.createElement('div');
-  if (g.winnerName) {
-    title.innerHTML = `🏆 <span style="color:${g.winnerColor}">${g.winnerName}</span> wins!`;
+  if (g.winnerTeam !== null && g.winnerTeam !== undefined) {
+    title.innerHTML = `🏆 <span style="color:${C.TEAM_COLORS[g.winnerTeam % C.TEAM_COLORS.length]}">${displayName(g.winnerTeam)}</span> wins!`;
   } else {
     title.textContent = 'Draw — everyone wiped out!';
   }
   ov.appendChild(title);
   const btn = document.createElement('button');
-  btn.textContent = 'Back to lobby';
+  btn.textContent = 'Play again';
   btn.onclick = () => location.reload();
   ov.appendChild(btn);
-});
+}
 
-socket.on('chat', (m) => addChat(m.name, m.text, C.TEAM_COLORS[m.team % C.TEAM_COLORS.length]));
-socket.on('disconnect', () => addChat('System', 'Disconnected from server.', '#e6394b'));
+function displayName(team) {
+  return State.teamNames[team] || C.TEAM_NAMES[team % C.TEAM_NAMES.length];
+}
 
 // ----------------------------------------------------------------------------
-// Terrain rendering (offscreen canvas kept in sync with server craters)
+// Pass-the-phone overlay
+// ----------------------------------------------------------------------------
+function showPassOverlay(team) {
+  State.paused = true;
+  const ov = $('passOverlay');
+  const color = C.TEAM_COLORS[team % C.TEAM_COLORS.length];
+  $('passName').textContent = displayName(team);
+  $('passName').style.color = color;
+  const pill = $('passPill');
+  pill.textContent = C.TEAM_NAMES[team % C.TEAM_NAMES.length] + ' team';
+  pill.style.background = color;
+  ov.classList.remove('hidden');
+}
+
+$('passStart').addEventListener('click', () => {
+  $('passOverlay').classList.add('hidden');
+  State.paused = false;
+});
+
+// ----------------------------------------------------------------------------
+// Terrain rendering
 // ----------------------------------------------------------------------------
 function buildTerrainCanvas() {
   const { grid, width, height } = State.terrain;
   const cv = document.createElement('canvas');
   cv.width = width;
   cv.height = height;
-  const ctx = cv.getContext('2d');
-  const img = ctx.createImageData(width, height);
+  const ctx2 = cv.getContext('2d');
+  const img = ctx2.createImageData(width, height);
   const data = img.data;
   for (let x = 0; x < width; x++) {
     let foundTop = false;
@@ -236,12 +289,10 @@ function buildTerrainCanvas() {
       const i = (y * width + x) * 4;
       if (grid[y * width + x]) {
         if (!foundTop) {
-          // grassy crust on the surface
           data[i] = 86; data[i + 1] = 178; data[i + 2] = 64; data[i + 3] = 255;
           foundTop = true;
         } else {
-          // dirt body with a little vertical shading
-          const shade = 1 - Math.min(1, (y) / height) * 0.25;
+          const shade = 1 - Math.min(1, y / height) * 0.25;
           data[i] = 120 * shade; data[i + 1] = 82 * shade; data[i + 2] = 50 * shade; data[i + 3] = 255;
         }
       } else {
@@ -249,31 +300,29 @@ function buildTerrainCanvas() {
       }
     }
   }
-  ctx.putImageData(img, 0, 0);
+  ctx2.putImageData(img, 0, 0);
   State.terrainCanvas = cv;
 }
 
 function applyCrater(x, y, r, withRim) {
   if (!State.terrain) return;
   T.carveCircle(State.terrain, x, y, r);
-  const ctx = State.terrainCanvas.getContext('2d');
-  // punch a transparent hole
-  ctx.save();
-  ctx.globalCompositeOperation = 'destination-out';
-  ctx.beginPath();
-  ctx.arc(x, y, r, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.restore();
+  const ctx2 = State.terrainCanvas.getContext('2d');
+  ctx2.save();
+  ctx2.globalCompositeOperation = 'destination-out';
+  ctx2.beginPath();
+  ctx2.arc(x, y, r, 0, Math.PI * 2);
+  ctx2.fill();
+  ctx2.restore();
   if (withRim) {
-    // scorched rim for visual feedback
-    ctx.save();
-    ctx.globalCompositeOperation = 'source-atop';
-    ctx.beginPath();
-    ctx.arc(x, y, r + 3, 0, Math.PI * 2);
-    ctx.lineWidth = 5;
-    ctx.strokeStyle = 'rgba(20,12,8,0.55)';
-    ctx.stroke();
-    ctx.restore();
+    ctx2.save();
+    ctx2.globalCompositeOperation = 'source-atop';
+    ctx2.beginPath();
+    ctx2.arc(x, y, r + 3, 0, Math.PI * 2);
+    ctx2.lineWidth = 5;
+    ctx2.strokeStyle = 'rgba(20,12,8,0.55)';
+    ctx2.stroke();
+    ctx2.restore();
   }
 }
 
@@ -286,10 +335,14 @@ let scale = 1;
 
 function resizeCanvas() {
   const wrap = $('canvasWrap');
-  canvas.width = wrap.clientWidth;
-  canvas.height = wrap.clientHeight;
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  canvas.width = wrap.clientWidth * dpr;
+  canvas.height = wrap.clientHeight * dpr;
+  canvas.style.width = wrap.clientWidth + 'px';
+  canvas.style.height = wrap.clientHeight + 'px';
 }
 window.addEventListener('resize', resizeCanvas);
+window.addEventListener('orientationchange', () => setTimeout(resizeCanvas, 200));
 
 function worldToScreen(wx, wy) {
   return { x: (wx - State.camX) * scale, y: (wy - State.camY) * scale };
@@ -300,15 +353,12 @@ function screenToWorld(sx, sy) {
 
 function updateCamera() {
   scale = canvas.height / C.WORLD_HEIGHT;
-  // follow projectile if firing, else the active worm
   let fx = C.WORLD_WIDTH / 2;
-  let fy = C.WORLD_HEIGHT / 2;
   if (State.projectiles.length) {
     fx = State.projectiles[0].x;
-    fy = State.projectiles[0].y;
   } else {
     const w = activeWorm();
-    if (w) { fx = w.rx !== undefined ? w.rx : w.x; fy = w.ry !== undefined ? w.ry : w.y; }
+    if (w) fx = w.rx !== undefined ? w.rx : w.x;
   }
   const viewW = canvas.width / scale;
   State.camX = clamp(fx - viewW / 2, 0, Math.max(0, C.WORLD_WIDTH - viewW));
@@ -316,20 +366,19 @@ function updateCamera() {
 }
 
 // ----------------------------------------------------------------------------
-// Main render loop
+// Helpers for the active worm
 // ----------------------------------------------------------------------------
 function activeWorm() {
   return State.worms.find((w) => w.id === State.activeWormId) || null;
 }
-function myWorm() {
+function canControl() {
   const w = activeWorm();
-  return w && w.team === State.myTeam ? w : null;
-}
-function isMyTurn() {
-  const w = activeWorm();
-  return !!w && w.alive && w.team === State.myTeam && State.phase === 'aiming';
+  return !!w && w.alive && State.phase === 'aiming' && !State.paused;
 }
 
+// ----------------------------------------------------------------------------
+// Main loop
+// ----------------------------------------------------------------------------
 function loop() {
   requestAnimationFrame(loop);
   if (!State.started) return;
@@ -340,18 +389,21 @@ function loop() {
 requestAnimationFrame(loop);
 
 function stepLocal() {
-  // lerp render positions toward authoritative
   for (const w of State.worms) {
     if (w.rx === undefined) { w.rx = w.x; w.ry = w.y; }
     w.rx += (w.x - w.rx) * 0.4;
     w.ry += (w.y - w.ry) * 0.4;
   }
-  // charge power locally while held
-  if (State.charging && isMyTurn()) {
-    State.power = Math.min(100, State.power + 1.6);
-    $('powerBar').style.width = State.power + '%';
+
+  if (canControl()) {
+    if (heldActs.has('aimUp')) adjustAim(activeFacing() >= 0 ? -0.035 : 0.035);
+    if (heldActs.has('aimDown')) adjustAim(activeFacing() >= 0 ? 0.035 : -0.035);
+    if (State.charging) {
+      State.power = Math.min(100, State.power + 1.5);
+      $('powerBar').style.width = State.power + '%';
+    }
   }
-  // particles
+
   for (const p of State.particles) {
     p.vy += 0.25;
     p.x += p.vx; p.y += p.vy;
@@ -362,8 +414,12 @@ function stepLocal() {
   State.tracers = State.tracers.filter((t) => t.life > 0);
 }
 
+function activeFacing() {
+  const w = activeWorm();
+  return w ? w.facing : 1;
+}
+
 function draw() {
-  // sky
   const g = ctx.createLinearGradient(0, 0, 0, canvas.height);
   g.addColorStop(0, '#1b3a5c');
   g.addColorStop(0.7, '#2d5a7a');
@@ -371,12 +427,10 @@ function draw() {
   ctx.fillStyle = g;
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-  // water at the bottom of the world
   const waterTop = worldToScreen(0, C.WORLD_HEIGHT).y;
   ctx.fillStyle = 'rgba(40,120,180,0.5)';
   ctx.fillRect(0, waterTop, canvas.width, canvas.height - waterTop);
 
-  // terrain
   if (State.terrainCanvas) {
     ctx.imageSmoothingEnabled = false;
     ctx.drawImage(
@@ -390,7 +444,7 @@ function draw() {
   drawWorms();
   drawProjectiles();
   drawParticles();
-  if (isMyTurn()) drawAim();
+  if (canControl()) drawAim();
 }
 
 function drawWorms() {
@@ -403,12 +457,10 @@ function drawWorms() {
     const top = s.y;
     const color = C.TEAM_COLORS[w.team % C.TEAM_COLORS.length];
 
-    // body
     ctx.fillStyle = color;
     roundRect(ctx, cx - ww / 2, top, ww, wh, 4 * scale);
     ctx.fill();
 
-    // eyes
     ctx.fillStyle = '#fff';
     const ex = w.facing >= 0 ? cx + ww * 0.05 : cx - ww * 0.05;
     ctx.beginPath();
@@ -421,7 +473,6 @@ function drawWorms() {
     ctx.arc(ex + 1.8 * scale + w.facing * 0.6 * scale, top + wh * 0.32, 0.8 * scale, 0, 7);
     ctx.fill();
 
-    // active-worm marker
     if (w.id === State.activeWormId) {
       ctx.fillStyle = '#fff';
       ctx.beginPath();
@@ -432,7 +483,6 @@ function drawWorms() {
       ctx.fill();
     }
 
-    // name + health bar
     const barW = Math.max(34, ww * 2.6);
     const barY = top - 12 * scale;
     ctx.fillStyle = 'rgba(0,0,0,0.5)';
@@ -440,13 +490,12 @@ function drawWorms() {
     ctx.fillStyle = color;
     ctx.fillRect(cx - barW / 2, barY, barW * (w.hp / C.WORM_MAX_HP), 5);
     ctx.fillStyle = '#fff';
-    ctx.font = `${Math.max(10, 11)}px system-ui`;
+    ctx.font = '11px system-ui';
     ctx.textAlign = 'center';
     ctx.fillText(`${w.name} ${w.hp}`, cx, barY - 3);
 
-    // aim barrel for the active worm
     if (w.id === State.activeWormId) {
-      const aim = (w.team === State.myTeam && State.localAim !== null) ? State.localAim : w.aim;
+      const aim = (State.localAim !== null) ? State.localAim : w.aim;
       const bx = cx;
       const by = top + wh / 2;
       ctx.strokeStyle = '#ffffffcc';
@@ -501,12 +550,9 @@ function drawTracers() {
 }
 
 function drawAim() {
-  const w = myWorm();
+  const w = activeWorm();
   if (!w) return;
   const aim = State.localAim !== null ? State.localAim : w.aim;
-  const start = worldToScreen(w.rx, w.ry + C.WORM_HEIGHT / 2);
-
-  // crosshair
   const ch = worldToScreen(w.rx + Math.cos(aim) * 60, w.ry + C.WORM_HEIGHT / 2 + Math.sin(aim) * 60);
   ctx.strokeStyle = '#ffffff66';
   ctx.lineWidth = 1;
@@ -516,7 +562,6 @@ function drawAim() {
   ctx.moveTo(ch.x, ch.y - 10); ctx.lineTo(ch.x, ch.y + 10);
   ctx.stroke();
 
-  // predicted trajectory for arc weapons
   const wpn = C.WEAPONS[State.weapon];
   if (wpn && wpn.kind === 'projectile' && State.power > 0) {
     const speed = State.power * wpn.speedFactor;
@@ -525,7 +570,7 @@ function drawAim() {
     let vx = Math.cos(aim) * speed;
     let vy = Math.sin(aim) * speed;
     ctx.fillStyle = '#ffffffaa';
-    for (let i = 0; i < 60; i++) {
+    for (let i = 0; i < 70; i++) {
       vy += C.GRAVITY * wpn.gravity;
       if (wpn.affectedByWind) vx += State.wind;
       px += vx; py += vy;
@@ -588,7 +633,8 @@ function renderWeaponChips() {
     const wpn = C.WEAPONS[id];
     const chip = document.createElement('span');
     chip.className = 'wchip' + (id === State.weapon ? ' active' : '');
-    chip.textContent = `${wpn.key} ${wpn.name}`;
+    chip.textContent = wpn.name;
+    chip.addEventListener('click', () => selectWeapon(id));
     box.appendChild(chip);
   });
 }
@@ -596,11 +642,11 @@ function renderWeaponChips() {
 function updateHud() {
   $('timerVal').textContent = State.timeLeft;
   const arrow = $('windArrow');
-  const mag = Math.abs(State.wind) / State.windMax;
+  const mag = State.windMax ? Math.abs(State.wind) / State.windMax : 0;
   arrow.textContent = State.wind >= 0 ? '→' : '←';
   arrow.style.opacity = 0.3 + 0.7 * mag;
   arrow.style.color = mag > 0.6 ? '#e6394b' : '#e6edf3';
-  $('windVal').textContent = `${Math.round(mag * 10)}`;
+  $('windVal').textContent = ` ${Math.round(mag * 10)}`;
   if (!State.charging) $('powerBar').style.width = State.power + '%';
   renderTeamScores();
 }
@@ -616,83 +662,77 @@ function renderTeamScores() {
   Object.keys(teams).forEach((tk) => {
     const t = teams[tk];
     const color = C.TEAM_COLORS[tk % C.TEAM_COLORS.length];
+    const maxHp = State.wormsPerTeam * C.WORM_MAX_HP;
     const row = document.createElement('div');
     row.className = 'team-row';
     row.innerHTML = `<span class="dot" style="background:${color}"></span>` +
-      `<div class="bar"><div style="width:${Math.min(100, t.hp / (C.WORMS_PER_TEAM * C.WORM_MAX_HP) * 100)}%;background:${color}"></div></div>` +
+      `<div class="bar"><div style="width:${Math.min(100, (t.hp / maxHp) * 100)}%;background:${color}"></div></div>` +
       `<span>${t.alive}🪱</span>`;
     box.appendChild(row);
   });
 }
 
-function addChat(name, text, color) {
-  const log = $('chatLog');
-  const div = document.createElement('div');
-  div.className = 'msg';
-  div.innerHTML = `<span class="who" style="color:${color || '#fff'}">${escapeHtml(name)}:</span> ${escapeHtml(text)}`;
-  log.appendChild(div);
-  log.scrollTop = log.scrollHeight;
-}
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+// ----------------------------------------------------------------------------
+// Input: aim / fire / weapon / walk
+// ----------------------------------------------------------------------------
+function adjustAim(delta) {
+  if (State.localAim === null) { const w = activeWorm(); State.localAim = w ? w.aim : 0; }
+  State.localAim += delta;
+  sendInput({ type: 'aim', aim: State.localAim });
 }
 
-// ----------------------------------------------------------------------------
-// Input
-// ----------------------------------------------------------------------------
-let lastAimSent = 0;
-function sendAim() {
-  const now = performance.now();
-  if (now - lastAimSent < 40) return;
-  lastAimSent = now;
-  if (State.localAim !== null) socket.emit('input', { type: 'aim', aim: State.localAim });
+function selectWeapon(id) {
+  if (!canControl()) return;
+  State.weapon = id;
+  sendInput({ type: 'weapon', weapon: id });
+  renderWeaponChips();
 }
 
 function setWalk(dir) {
   if (State.walkDir === dir) return;
   State.walkDir = dir;
-  socket.emit('input', { type: 'walk', dir });
+  sendInput({ type: 'walk', dir });
 }
 
+function startCharge() {
+  if (!canControl()) return;
+  if (!State.charging) { State.charging = true; State.power = 0; }
+}
+
+function fire() {
+  if (!State.charging) return;
+  State.charging = false;
+  if (!canControl()) { State.power = 0; $('powerBar').style.width = '0%'; return; }
+  const w = activeWorm();
+  const aim = State.localAim !== null ? State.localAim : (w ? w.aim : 0);
+  sendInput({ type: 'fire', power: State.power, aim });
+  State.power = 0;
+  $('powerBar').style.width = '0%';
+}
+
+// ----------------------------------------------------------------------------
+// Keyboard (desktop)
+// ----------------------------------------------------------------------------
 document.addEventListener('keydown', (e) => {
-  if (document.activeElement === $('chatInput')) {
-    if (e.key === 'Enter') {
-      const text = $('chatInput').value.trim();
-      if (text) socket.emit('chat', { text });
-      $('chatInput').value = '';
-      $('chatInput').blur();
-    } else if (e.key === 'Escape') {
-      $('chatInput').blur();
+  if (!canControl()) {
+    // allow Enter/Space to dismiss the pass overlay
+    if (!$('passOverlay').classList.contains('hidden') && (e.key === 'Enter' || e.key === ' ')) {
+      e.preventDefault();
+      $('passStart').click();
     }
     return;
   }
-
-  if (e.key === 't' || e.key === 'T') { e.preventDefault(); $('chatInput').focus(); return; }
-
-  if (!isMyTurn()) return;
-  const w = myWorm();
+  const w = activeWorm();
   if (!w) return;
   if (State.localAim === null) State.localAim = w.aim;
 
   switch (e.key) {
-    case 'ArrowLeft': case 'a': case 'A':
-      setWalk(-1); State.useMouseAim = false; break;
-    case 'ArrowRight': case 'd': case 'D':
-      setWalk(1); State.useMouseAim = false; break;
-    case 'ArrowUp': case 'w': case 'W':
-      e.preventDefault();
-      State.useMouseAim = false;
-      adjustAim(w.facing >= 0 ? -0.05 : 0.05); break;
-    case 'ArrowDown': case 's': case 'S':
-      e.preventDefault();
-      State.useMouseAim = false;
-      adjustAim(w.facing >= 0 ? 0.05 : -0.05); break;
-    case 'Enter':
-      socket.emit('input', { type: 'jump' }); break;
-    case ' ':
-      e.preventDefault();
-      if (!State.charging) { State.charging = true; State.power = 0; }
-      break;
+    case 'ArrowLeft': case 'a': case 'A': setWalk(-1); break;
+    case 'ArrowRight': case 'd': case 'D': setWalk(1); break;
+    case 'ArrowUp': case 'w': case 'W': e.preventDefault(); adjustAim(w.facing >= 0 ? -0.05 : 0.05); break;
+    case 'ArrowDown': case 's': case 'S': e.preventDefault(); adjustAim(w.facing >= 0 ? 0.05 : -0.05); break;
+    case 'Enter': sendInput({ type: 'jump' }); break;
+    case ' ': e.preventDefault(); startCharge(); break;
     case '1': selectWeapon('bazooka'); break;
     case '2': selectWeapon('grenade'); break;
     case '3': selectWeapon('shotgun'); break;
@@ -701,71 +741,66 @@ document.addEventListener('keydown', (e) => {
 });
 
 document.addEventListener('keyup', (e) => {
-  if (document.activeElement === $('chatInput')) return;
   switch (e.key) {
-    case 'ArrowLeft': case 'a': case 'A':
-      if (State.walkDir === -1) setWalk(0); break;
-    case 'ArrowRight': case 'd': case 'D':
-      if (State.walkDir === 1) setWalk(0); break;
-    case ' ':
-      if (State.charging) fire();
-      break;
+    case 'ArrowLeft': case 'a': case 'A': if (State.walkDir === -1) setWalk(0); break;
+    case 'ArrowRight': case 'd': case 'D': if (State.walkDir === 1) setWalk(0); break;
+    case ' ': if (State.charging) fire(); break;
   }
 });
 
-function adjustAim(delta) {
-  if (State.localAim === null) { const w = myWorm(); State.localAim = w ? w.aim : 0; }
-  State.localAim += delta;
-  sendAim();
-}
-
-function selectWeapon(id) {
-  if (!isMyTurn()) return;
-  State.weapon = id;
-  socket.emit('input', { type: 'weapon', weapon: id });
-  renderWeaponChips();
-}
-
-function fire() {
-  State.charging = false;
-  if (!isMyTurn()) { State.power = 0; return; }
-  const aim = State.localAim !== null ? State.localAim : (myWorm() ? myWorm().aim : 0);
-  socket.emit('input', { type: 'fire', power: State.power, aim });
-  State.power = 0;
-  $('powerBar').style.width = '0%';
-}
-
-// Mouse aiming + charging
-canvas.addEventListener('mousemove', (e) => {
-  const rect = canvas.getBoundingClientRect();
-  State.mouse.x = e.clientX - rect.left;
-  State.mouse.y = e.clientY - rect.top;
-  if (!isMyTurn()) return;
-  const w = myWorm();
-  if (!w) return;
-  const wp = screenToWorld(State.mouse.x, State.mouse.y);
-  const ang = Math.atan2(wp.y - (w.ry + C.WORM_HEIGHT / 2), wp.x - w.rx);
-  State.localAim = ang;
-  State.useMouseAim = true;
-  sendAim();
-});
-
-canvas.addEventListener('mousedown', (e) => {
-  if (e.button !== 0) return;
-  if (!isMyTurn()) return;
-  if (!State.charging) { State.charging = true; State.power = 0; }
-});
-canvas.addEventListener('mouseup', (e) => {
-  if (e.button !== 0) return;
-  if (State.charging) fire();
-});
-
-// stop the page from scrolling on space/arrows during play
+// Stop space/arrows from scrolling the page during play.
 window.addEventListener('keydown', (e) => {
-  if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' '].includes(e.key) &&
-      document.activeElement !== $('chatInput')) {
-    e.preventDefault();
-  }
+  if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' '].includes(e.key)) e.preventDefault();
 }, { passive: false });
+
+// ----------------------------------------------------------------------------
+// Touch / on-screen controls
+// ----------------------------------------------------------------------------
+const heldActs = new Set();
+
+document.querySelectorAll('.ctl').forEach((btn) => {
+  const act = btn.dataset.act;
+  const down = (e) => {
+    e.preventDefault();
+    if (!canControl()) return;
+    heldActs.add(act);
+    if (act === 'left') { setWalk(-1); btn.classList.add('active'); }
+    else if (act === 'right') { setWalk(1); btn.classList.add('active'); }
+    else if (act === 'jump') { sendInput({ type: 'jump' }); }
+    else if (act === 'fire') { startCharge(); btn.classList.add('charging'); }
+    else if (act === 'aimUp' || act === 'aimDown') { btn.classList.add('active'); }
+  };
+  const up = (e) => {
+    if (e) e.preventDefault();
+    heldActs.delete(act);
+    if (act === 'left' && State.walkDir === -1) setWalk(0);
+    if (act === 'right' && State.walkDir === 1) setWalk(0);
+    if (act === 'fire') { fire(); btn.classList.remove('charging'); }
+    btn.classList.remove('active');
+  };
+  btn.addEventListener('pointerdown', down);
+  btn.addEventListener('pointerup', up);
+  btn.addEventListener('pointercancel', up);
+  btn.addEventListener('pointerleave', (e) => { if (heldActs.has(act)) up(e); });
+  btn.addEventListener('contextmenu', (e) => e.preventDefault());
+});
+
+// Drag on the canvas (mouse or touch) to aim toward the pointer.
+function canvasAim(clientX, clientY) {
+  if (!canControl()) return;
+  const w = activeWorm();
+  if (!w) return;
+  const rect = canvas.getBoundingClientRect();
+  const sx = (clientX - rect.left) * (canvas.width / rect.width);
+  const sy = (clientY - rect.top) * (canvas.height / rect.height);
+  const wp = screenToWorld(sx, sy);
+  State.localAim = Math.atan2(wp.y - (w.ry + C.WORM_HEIGHT / 2), wp.x - w.rx);
+  sendInput({ type: 'aim', aim: State.localAim });
+}
+
+let aimingPointer = false;
+canvas.addEventListener('pointerdown', (e) => { aimingPointer = true; canvasAim(e.clientX, e.clientY); });
+canvas.addEventListener('pointermove', (e) => { if (aimingPointer || e.pointerType === 'mouse') canvasAim(e.clientX, e.clientY); });
+window.addEventListener('pointerup', () => { aimingPointer = false; });
 
 function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }

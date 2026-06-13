@@ -1,19 +1,26 @@
 'use strict';
 
 /*
- * Authoritative game simulation for a single room.
+ * Game simulation for a single match.
  *
- * The server owns the truth: terrain, worm positions, projectiles, whose turn it
- * is, and the clock. Clients only send intentions (walk, aim, jump, fire) and
- * render the snapshots the server broadcasts. This prevents cheating and keeps
- * everyone perfectly in sync.
+ * Originally written as a server-authoritative module, it now also runs entirely
+ * in the browser for local "pass-and-play" (hot-seat) matches: the same code
+ * owns the terrain, worm positions, projectiles, turn order and the clock, and
+ * emits the same events. The UMD wrapper below lets it load with `require` in
+ * Node (for tests) or as a plain <script> in the browser.
  */
 
-const C = require('../shared/constants');
-const Terrain = require('../shared/terrain');
+(function (root, factory) {
+  if (typeof module !== 'undefined' && module.exports) {
+    module.exports = factory(require('../shared/constants'), require('../shared/terrain'));
+  } else {
+    root.WormsGame = factory(root.WormsConstants, root.WormsTerrain);
+  }
+})(typeof self !== 'undefined' ? self : this, function (C, Terrain) {
+  'use strict';
 
-let SEQ = 0;
-const nextId = () => ++SEQ;
+  let SEQ = 0;
+  const nextId = () => ++SEQ;
 
 class GameRoom {
   /**
@@ -115,11 +122,14 @@ class GameRoom {
     const teams = [...this.players.values()].map((p) => p.team);
     this.teamOrder = teams.slice();
 
+    // Worms per team can be overridden per match (set before calling start()).
+    const wormsPerTeam = this.wormsPerTeam || C.WORMS_PER_TEAM;
+
     // Spawn worms spread across the map, dropped onto the surface.
-    const totalWorms = teams.length * C.WORMS_PER_TEAM;
+    const totalWorms = teams.length * wormsPerTeam;
     const slots = this._spawnColumns(totalWorms);
     let slot = 0;
-    for (let w = 0; w < C.WORMS_PER_TEAM; w++) {
+    for (let w = 0; w < wormsPerTeam; w++) {
       for (const team of teams) {
         const x = slots[slot++];
         const y = this._surfaceY(x) - C.WORM_HEIGHT;
@@ -251,8 +261,12 @@ class GameRoom {
     if (this.phase !== 'aiming') return;
     const worm = this.activeWorm();
     if (!worm) return;
-    const player = this.players.get(playerId);
-    if (!player || player.team !== worm.team) return; // not your turn
+    // In hot-seat (local) mode a single human controls whichever worm is active,
+    // so we skip the per-player ownership check used by networked play.
+    if (!this.local) {
+      const player = this.players.get(playerId);
+      if (!player || player.team !== worm.team) return; // not your turn
+    }
 
     switch (msg.type) {
       case 'walk':
@@ -775,4 +789,5 @@ function clampAngle(a) {
   return a;
 }
 
-module.exports = { GameRoom };
+  return { GameRoom };
+});
