@@ -1,0 +1,11 @@
+# One-click deploy to Render (https://render.com): New → Blueprint → this repo.
+services:
+  - type: web
+    name: worms-emulator
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_VERSION
+        value: "22"

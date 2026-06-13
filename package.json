@@ -1,0 +1,26 @@
+{
+  "name": "worms-emulator",
+  "version": "1.0.0",
+  "description": "A multiplayer Worms-style turn-based artillery game playable in the browser with friends.",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test/smoke.test.js"
+  },
+  "keywords": [
+    "worms",
+    "game",
+    "multiplayer",
+    "artillery",
+    "socket.io"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.19.2",
+    "socket.io": "^4.7.5"
+  },
+  "devDependencies": {
+    "socket.io-client": "^4.8.3"
+  }
+}
