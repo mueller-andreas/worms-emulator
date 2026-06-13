@@ -1,0 +1,49 @@
+name: Deploy to GitHub Pages
+
+# The game is a static site (index.html at the repo root), so we can publish it
+# straight to GitHub Pages. This workflow enables Pages (if it isn't already),
+# uploads the repository contents, and deploys them.
+
+on:
+  push:
+    branches:
+      - claude/multiplayer-worms-game-v6fawm
+      - main
+  workflow_dispatch:
+
+# Permissions needed for the GitHub Pages deployment.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Allow only one concurrent Pages deployment.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+        with:
+          # Create/enable the Pages site automatically if it doesn't exist yet.
+          enablement: true
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          # Publish the whole repo; index.html at the root is the entry point.
+          path: .
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

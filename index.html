@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#0d1117" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <title>🪱 Worms Emulator — Pass &amp; Play</title>
+  <link rel="stylesheet" href="style.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>🪱</text></svg>" />
+</head>
+<body>
+  <!-- ============ SETUP ============ -->
+  <div id="setup" class="screen">
+    <div class="setup-card">
+      <h1>🪱 Worms Emulator</h1>
+      <p class="tag">Local pass-and-play. One device, take turns, blow each other up. 💥</p>
+
+      <div class="field">
+        <label>Number of teams</label>
+        <div class="stepper" data-stepper="teams">
+          <button type="button" data-step="-1">−</button>
+          <span id="teamCount">2</span>
+          <button type="button" data-step="1">+</button>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>Worms per team</label>
+        <div class="stepper" data-stepper="worms">
+          <button type="button" data-step="-1">−</button>
+          <span id="wormCount">3</span>
+          <button type="button" data-step="1">+</button>
+        </div>
+      </div>
+
+      <div id="teamNames" class="team-names"></div>
+
+      <button id="startBtn" class="primary big">Start Game ▶</button>
+      <p class="how">
+        Each turn the screen shows whose go it is — hand the device to that player,
+        they tap <b>Start Turn</b>, aim, and fire. Last team standing wins.
+      </p>
+    </div>
+  </div>
+
+  <!-- ============ GAME ============ -->
+  <div id="game" class="screen hidden">
+    <div id="hud">
+      <div id="turnBanner"><span id="turnTeam">—</span></div>
+      <div id="timer">⏱ <span id="timerVal">0</span></div>
+      <div id="windBox">Wind <span id="windArrow">→</span><span id="windVal"></span></div>
+      <div id="weaponBox"></div>
+      <div id="teamScores"></div>
+    </div>
+
+    <div id="canvasWrap">
+      <canvas id="view"></canvas>
+
+      <div id="powerWrap"><div id="powerBar"></div></div>
+
+      <!-- On-screen touch controls (also clickable with a mouse) -->
+      <div id="controls">
+        <div class="pad left">
+          <button class="ctl" data-act="left" aria-label="Move left">◀</button>
+          <button class="ctl" data-act="right" aria-label="Move right">▶</button>
+          <button class="ctl jump" data-act="jump" aria-label="Jump">JUMP</button>
+        </div>
+        <div class="pad right">
+          <button class="ctl" data-act="aimUp" aria-label="Aim up">▲</button>
+          <button class="ctl" data-act="aimDown" aria-label="Aim down">▼</button>
+          <button class="ctl fire" data-act="fire" id="fireBtn" aria-label="Hold to charge, release to fire">FIRE</button>
+        </div>
+      </div>
+
+      <!-- Pass-the-phone interstitial -->
+      <div id="passOverlay" class="overlay hidden">
+        <div class="pass-card">
+          <div class="pass-pill" id="passPill">Team</div>
+          <h2>Pass the phone to</h2>
+          <div id="passName" class="pass-name">Player</div>
+          <button id="passStart" class="primary big">Start Turn ▶</button>
+        </div>
+      </div>
+
+      <!-- Game over -->
+      <div id="overlay" class="overlay hidden"></div>
+    </div>
+  </div>
+
+  <div id="rotateHint">
+    <div style="font-size:40px">🔄</div>
+    <div>Rotate your device to landscape for the best view.</div>
+  </div>
+
+  <script src="shared/constants.js"></script>
+  <script src="shared/terrain.js"></script>
+  <script src="src/game.js"></script>
+  <script src="client.js"></script>
+</body>
+</html>
